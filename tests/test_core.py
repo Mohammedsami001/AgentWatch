@@ -45,6 +45,7 @@ from agentwatch.scoring.confidence import (
 # Fixtures
 # ─────────────────────────────────────────────
 
+
 def make_session(**kwargs) -> AgentSession:
     return AgentSession(
         agent_id="test-agent",
@@ -69,7 +70,9 @@ def make_event(
     )
 
 
-def make_tool_call_event(tool_name: str, raw_command: str = "", session_id: str = "s1") -> AgentEvent:
+def make_tool_call_event(
+    tool_name: str, raw_command: str = "", session_id: str = "s1"
+) -> AgentEvent:
     return make_event(
         event_type=EventType.TOOL_CALL,
         session_id=session_id,
@@ -84,6 +87,7 @@ def make_tool_call_event(tool_name: str, raw_command: str = "", session_id: str 
 # ─────────────────────────────────────────────
 # Schema tests
 # ─────────────────────────────────────────────
+
 
 class TestSchema:
     def test_agent_event_defaults(self):
@@ -138,6 +142,7 @@ class TestSchema:
 # ─────────────────────────────────────────────
 # Safety tests
 # ─────────────────────────────────────────────
+
 
 class TestRiskScorer:
     def setup_method(self):
@@ -253,6 +258,7 @@ class TestSafetyEngine:
 # Confidence scoring tests
 # ─────────────────────────────────────────────
 
+
 class TestConfidenceScorer:
     def setup_method(self):
         self.scorer = ConfidenceScorer()
@@ -300,8 +306,7 @@ class TestConfidenceScorer:
         blocked = make_tool_call_event("bash", "rm -rf /")
         blocked.status = ExecutionStatus.BLOCKED
         blocked.safety = SafetyCheckData(
-            risk_level=RiskLevel.CRITICAL, risk_score=1.0,
-            blocked=True, reasons=["critical"]
+            risk_level=RiskLevel.CRITICAL, risk_score=1.0, blocked=True, reasons=["critical"]
         )
         events.extend([blocked] * 3)
 
@@ -331,6 +336,7 @@ class TestConfidenceScorer:
 # Replay engine tests
 # ─────────────────────────────────────────────
 
+
 class TestReplayEngine:
     def test_load_from_events_builds_steps(self):
         session = make_session(session_id="s1")
@@ -352,7 +358,9 @@ class TestReplayEngine:
             e = make_event(EventType.TOOL_ERROR, session_id="s2")
             e.tool_result = ToolResultData(tool_name="bash", error="fail")
             events.append(e)
-        events.append(make_event(EventType.AGENT_END, status=ExecutionStatus.FAILURE, session_id="s2"))
+        events.append(
+            make_event(EventType.AGENT_END, status=ExecutionStatus.FAILURE, session_id="s2")
+        )
 
         engine = ReplayEngine()
         rs = engine.load_from_events(session, events)
@@ -365,10 +373,12 @@ class TestReplayEngine:
         blocked = make_tool_call_event("bash", "rm -rf /", session_id="s3")
         blocked.status = ExecutionStatus.BLOCKED
         blocked.safety = SafetyCheckData(
-            risk_level=RiskLevel.CRITICAL, risk_score=1.0,
-            blocked=True, reasons=["critical path"]
+            risk_level=RiskLevel.CRITICAL, risk_score=1.0, blocked=True, reasons=["critical path"]
         )
-        events = [blocked, make_event(EventType.AGENT_END, status=ExecutionStatus.FAILURE, session_id="s3")]
+        events = [
+            blocked,
+            make_event(EventType.AGENT_END, status=ExecutionStatus.FAILURE, session_id="s3"),
+        ]
 
         engine = ReplayEngine()
         rs = engine.load_from_events(session, events)
@@ -381,9 +391,11 @@ class TestReplayEngine:
         rs = engine.load_from_events(session, events)
 
         steps_seen = []
+
         async def _collect():
             async for step in engine.replay_async(rs, speed=ReplaySpeed.INSTANT):
                 steps_seen.append(step.index)
+
         asyncio.run(_collect())
         assert len(steps_seen) == 10
 
@@ -421,6 +433,7 @@ class TestReplayEngine:
 # ─────────────────────────────────────────────
 # Event bus tests
 # ─────────────────────────────────────────────
+
 
 class TestEventBus:
     @pytest.mark.asyncio
@@ -490,6 +503,29 @@ class TestEventBus:
         bus.publish_sync(make_event(EventType.TOOL_CALL))
         stats = bus.stats()
         assert stats["total_published"] >= 1
+
+    def test_handler_cleanup_on_reregister(self):
+        bus = EventBus()
+        call_counts = {"a": 0, "b": 0}
+
+        def handler_a(ev):
+            call_counts["a"] += 1
+
+        def handler_b(ev):
+            call_counts["b"] += 1
+
+        # Register A with ID "h1"
+        bus.subscribe_fn(handler_a, handler_id="h1")
+        # Register B with same ID "h1"
+        bus.subscribe_fn(handler_b, handler_id="h1")
+
+        # Publish
+        bus.publish_sync(make_event())
+
+        # Only B should have been called
+        assert call_counts["a"] == 0
+        assert call_counts["b"] == 1
+        assert bus.handler_count() == 1
 
 
 # ─────────────────────────────────────────────

@@ -13,14 +13,17 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from agentwatch.core.policy_dsl import PolicyAction, PolicyEngine
 from agentwatch.core.schema import (
     AgentEvent,
+    ConfidenceData,
     EventType,
     ExecutionStatus,
     RiskLevel,
     SafetyCheckData,
     ToolCallData,
 )
+from agentwatch.reasoning.auditor import ReasoningAuditor
 
 logger = logging.getLogger(__name__)
 
@@ -289,16 +292,22 @@ class SafetyEngine:
         self,
         policy: SafetyPolicy | None = None,
         approval_callback: ApprovalCallback | None = None,
+        auditor: ReasoningAuditor | None = None,
+        policy_engine: PolicyEngine | None = None,
     ) -> None:
         """Create a safety engine with optional policy and approval hook.
 
         Args:
             policy: Blocking/approval rules; defaults to :data:`DEFAULT_POLICY`.
             approval_callback: Async callback for human-in-the-loop approval.
+            auditor: Reasoning auditor for confidence scoring.
+            policy_engine: DSL policy engine for complex rules.
         """
         self._policy = policy or DEFAULT_POLICY
         self._scorer = RiskScorer(extra_patterns=self._policy.custom_patterns)
         self._approval_callback = approval_callback
+        self._auditor = auditor or ReasoningAuditor()
+        self._policy_engine = policy_engine or PolicyEngine()
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
         self._blocked_count = 0
         self._approved_count = 0
@@ -314,62 +323,98 @@ class SafetyEngine:
             event: The event to evaluate.
 
         Returns:
-            The event with ``safety`` metadata attached; status may be set to
-            ``BLOCKED`` when policy requires it.
+            The event with ``safety`` and optional ``confidence`` metadata attached;
+            status may be set to ``BLOCKED`` when policy requires it.
         """
         if event.event_type != EventType.TOOL_CALL or event.tool_call is None:
             return event
 
         self._checked_count += 1
         tool_call = event.tool_call
+
+        # 1. Pattern-based risk scoring
         risk_level, risk_score, reasons, policies = self._scorer.score(tool_call)
 
+        # 2. Confidence-based reasoning audit
+        audit = await self._auditor.audit_step(event.step_number, event)
+        event.confidence = ConfidenceData(
+            overall_score=audit.score,
+            explanation=audit.rationale,
+        )
+
+        # 3. Static/Pattern-based blocking (pre-DSL)
         block_immediate = False
         for pat in self._scorer._patterns:
             if pat.block_by_default:
-                full_text = " ".join(
-                    filter(None, [tool_call.raw_command, tool_call.tool_name])
-                )
+                full_text = " ".join(filter(None, [tool_call.raw_command, tool_call.tool_name]))
                 if re.search(pat.pattern, full_text, re.IGNORECASE):
                     block_immediate = True
                     break
 
-        requires_approval = False
-
-        if risk_level == RiskLevel.CRITICAL:
-            block_immediate = True
-        elif risk_level == RiskLevel.HIGH and self._policy.block_on_high:
-            block_immediate = True
-        elif risk_level == RiskLevel.HIGH and self._policy.require_approval_on_high:
-            requires_approval = True
-        elif risk_level == RiskLevel.MEDIUM and self._policy.require_approval_on_medium:
-            requires_approval = True
-
+        # 4. Aggregate safety data for policy evaluation
         safety_data = SafetyCheckData(
             risk_level=risk_level,
             risk_score=risk_score,
             blocked=block_immediate,
             reasons=reasons,
             matched_policies=policies,
-            requires_approval=requires_approval and not block_immediate,
             approval_timeout_seconds=self._policy.approval_timeout_seconds,
         )
-
         event.safety = safety_data
 
-        if block_immediate:
+        # 5. DSL Policy evaluation
+        decision = self._policy_engine.evaluate(event)
+
+        # Preserve previously computed block_immediate if DSL says ALLOW
+        if decision.action == PolicyAction.BLOCK:
+            block_immediate = True
+        elif decision.action == PolicyAction.PAUSE_AND_ALERT:
+            block_immediate = True
+
+        requires_approval = decision.action == PolicyAction.REQUIRE_APPROVAL
+
+        # Fallback to static policy if no DSL rules matched
+        if decision.action == PolicyAction.ALLOW and not block_immediate:
+            if risk_level == RiskLevel.CRITICAL:
+                block_immediate = True
+            elif risk_level == RiskLevel.HIGH and self._policy.block_on_high:
+                block_immediate = True
+            elif risk_level == RiskLevel.HIGH and self._policy.require_approval_on_high:
+                requires_approval = True
+            elif risk_level == RiskLevel.MEDIUM and self._policy.require_approval_on_medium:
+                requires_approval = True
+
+        safety_data.blocked = block_immediate
+        safety_data.requires_approval = requires_approval and not safety_data.blocked
+        if decision.reasons:
+            safety_data.reasons.extend(decision.reasons)
+
+        if safety_data.blocked:
             event.status = ExecutionStatus.BLOCKED
             self._blocked_count += 1
             logger.warning(
-                "BLOCKED event %s [%s] risk=%s: %s",
+                "BLOCKED event %s [%s] risk=%s conf=%.2f: %s",
                 event.event_id,
                 event.tool_call.tool_name,
                 risk_level.value,
-                reasons,
+                audit.score,
+                safety_data.reasons,
             )
             return event
 
-        if requires_approval and self._approval_callback:
+        if requires_approval:
+            # CodeRabbit: Block if approval is required but no callback exists
+            if not self._approval_callback:
+                logger.warning(
+                    "Approval required for event %s but no callback registered. Blocking.",
+                    event.event_id,
+                )
+                event.status = ExecutionStatus.BLOCKED
+                safety_data.blocked = True
+                safety_data.requires_approval = False
+                self._blocked_count += 1
+                return event
+
             approved = await self._request_approval(event, safety_data)
             if not approved:
                 event.status = ExecutionStatus.BLOCKED
@@ -447,9 +492,7 @@ class SafetyEngine:
 
         # Honour block_by_default patterns even when general policy is lenient
         if not block:
-            full_text = " ".join(
-                [x for x in [tool_call.raw_command, tool_call.tool_name] if x]
-            )
+            full_text = " ".join([x for x in [tool_call.raw_command, tool_call.tool_name] if x])
             for pat in self._scorer._patterns:
                 if pat.block_by_default and re.search(pat.pattern, full_text, re.IGNORECASE):
                     block = True
