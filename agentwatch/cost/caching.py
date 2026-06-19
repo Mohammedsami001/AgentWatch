@@ -1,6 +1,6 @@
-from typing import Optional
-from dataclasses import dataclass
 import hashlib
+from dataclasses import dataclass
+
 
 @dataclass
 class CacheHit:
@@ -21,18 +21,20 @@ class SemanticCacheManager:
         Stores the response for a given prompt.
         """
         prompt_hash = self._hash_prompt(prompt)
-        self._cache[prompt_hash] = CacheHit(
+        cache_key = f"{framework}:{prompt_hash}"
+        self._cache[cache_key] = CacheHit(
             prompt_hash=prompt_hash,
             response_text=response_text,
             framework=framework
         )
 
-    async def search(self, prompt: str) -> Optional[CacheHit]:
+    async def search(self, prompt: str, framework: str) -> CacheHit | None:
         """
         Searches the cache for an exact match or semantically similar prompt.
         """
         prompt_hash = self._hash_prompt(prompt)
-        return self._cache.get(prompt_hash)
+        cache_key = f"{framework}:{prompt_hash}"
+        return self._cache.get(cache_key)
 
     def _hash_prompt(self, prompt: str) -> str:
         return hashlib.sha256(prompt.encode("utf-8")).hexdigest()

@@ -27,7 +27,7 @@ async def test_semantic_cache_manager_store_and_exact_match():
     )
     
     # Search for the exact prompt
-    hit = await manager.search(prompt)
+    hit = await manager.search(prompt, framework="openai")
     
     assert hit is not None
     assert hit.response_text == response
@@ -216,7 +216,9 @@ async def test_semantic_cache_manager_db_backend(monkeypatch):
         return [[1.0, 0.0] for _ in texts]
     monkeypatch.setattr(EmbeddingProvider, "embed", mock_embed)
 
-    db_session = AsyncMock()
+    db_session = MagicMock()
+    db_session.execute = AsyncMock()
+    db_session.commit = AsyncMock()
     # Mock the execute return value for .get()
     mock_result = MagicMock()
     mock_entry = SemanticCacheEntry(response_text="Blue Whale")

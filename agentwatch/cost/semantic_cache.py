@@ -46,8 +46,10 @@ class SemanticCache:
     def _hash_query(self, query: str) -> str:
         return hashlib.sha256(query.encode("utf-8")).hexdigest()
 
-    async def get(self, query: str) -> str | None:
+    async def get(self, query: str, ttl_days_override: int | None = None) -> str | None:
         """Get a cached response if semantic similarity is above threshold and not expired."""
+        effective_ttl = ttl_days_override if ttl_days_override is not None else self.ttl_days
+
         query_embeddings = await self.embedder.embed([query])
         query_vec = query_embeddings[0] if query_embeddings else None
 
@@ -66,8 +68,8 @@ class SemanticCache:
             # Try to fetch from DB. We'll fetch recent entries.
             now = datetime.datetime.now(datetime.UTC)
             q = select(SemanticCacheEntry)
-            if self.ttl_days is not None:
-                cutoff = now - datetime.timedelta(days=self.ttl_days)
+            if effective_ttl is not None:
+                cutoff = now - datetime.timedelta(days=effective_ttl)
                 q = q.where(SemanticCacheEntry.created_at >= cutoff)
             
             # If pgvector is fully configured, we could do:
@@ -76,12 +78,12 @@ class SemanticCache:
             try:
                 # Assuming pgvector cosine distance:
                 # .cosine_distance expects a list
+                max_distance = 1.0 - self.similarity_threshold
+                q = q.where(SemanticCacheEntry.prompt_vector.cosine_distance(query_vec) <= max_distance)
                 q = q.order_by(SemanticCacheEntry.prompt_vector.cosine_distance(query_vec)).limit(1)
                 result = await self.db_session.execute(q)
                 best_match_db = result.scalars().first()
                 if best_match_db:
-                    # We might need to check if the distance meets our threshold.
-                    # distance = 1 - similarity. So distance <= 1 - similarity_threshold
                     return best_match_db.response_text
             except Exception as e:
                 logger.warning(f"Failed to use pgvector cosine distance: {e}")
@@ -99,8 +101,8 @@ class SemanticCache:
             # Filter out expired entries if ttl_days is set
             valid_entries = []
             for entry in self._cache:
-                if self.ttl_days is not None:
-                    if (now - entry.created_at).total_seconds() > self.ttl_days * 86400:
+                if effective_ttl is not None:
+                    if (now - entry.created_at).total_seconds() > effective_ttl * 86400:
                         continue
                 valid_entries.append(entry)
 
@@ -135,8 +137,11 @@ class SemanticCache:
                 response_text=response,
                 framework=metadata.get("framework", "unknown") if metadata else "unknown"
             )
-            self.db_session.add(db_entry)
-            await self.db_session.commit()
+            try:
+                self.db_session.add(db_entry)
+                await self.db_session.commit()
+            except Exception as e:
+                logger.warning(f"Failed to persist cache entry to database: {e}")
             return
 
         async with self._lock:

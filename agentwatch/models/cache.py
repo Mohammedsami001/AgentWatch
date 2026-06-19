@@ -1,7 +1,9 @@
-from sqlalchemy import Column, Integer, String, DateTime
-from sqlalchemy.sql import func
 from pgvector.sqlalchemy import Vector
+from sqlalchemy import Column, DateTime, Integer, String
+from sqlalchemy.sql import func
+
 from agentwatch.core.models import Base
+
 
 class SemanticCacheEntry(Base):
     __tablename__ = "semantic_cache"
