@@ -31,8 +31,6 @@ app = typer.Typer(
     add_completion=True,
     rich_markup_mode="rich",
 )
-session_app = typer.Typer(name="session", help="Manage AgentWatch sessions.")
-app.add_typer(session_app)
 app.add_typer(mcp_app, name="mcp")
 
 console = Console()
@@ -1524,6 +1522,46 @@ def _print_sessions_table(sessions: list) -> None:
         )
 
     animate_table_rows(table, rows, delay=0.08)
+
+
+# ─────────────────────────────────────────────
+# session command group
+# ─────────────────────────────────────────────
+
+
+@session_app.command("rollback")
+def session_rollback(
+    session_id: str = typer.Argument(..., help="Session ID to rollback"),
+    to_step: int = typer.Option(..., "--to-step", min=0, help="Step number to rollback to"),
+) -> None:
+    """[bold]Rollback[/bold] a session to a specific step."""
+
+    async def _run() -> None:
+
+        from agentwatch.rollback.engine import RollbackEngine, RollbackStatus
+
+        engine = RollbackEngine()
+
+        console.print(
+            f"[dim]Rolling back session[/dim] "
+            f"[bold]{session_id}[/bold] "
+            f"[dim]to step[/dim] "
+            f"[bold]{to_step}[/bold]..."
+        )
+
+        result = await engine.rollback_session(session_id, to_step=to_step)
+
+        if result.status == RollbackStatus.COMPLETED:
+            console.print("\n[green]✓ Rollback complete[/green]")
+            if result.rolled_back_files:
+                console.print(f"  Restored {len(result.rolled_back_files)} files.")
+            if result.rolled_back_git_ref:
+                console.print(f"  Rolled back git to {result.rolled_back_git_ref[:8]}.")
+        else:
+            console.print(f"\n[red]✗ Rollback failed: {result.error}[/red]")
+            raise typer.Exit(1)
+
+    asyncio.run(_run())
 
 
 # ─────────────────────────────────────────────
